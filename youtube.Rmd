@@ -1,0 +1,287 @@
+---
+title: "Análise de Dados do Youtube"
+author: "Adolfo Cavalcante"
+date: "03/07/2019"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+#Define como padrão echo=FALSE pra não ter que especificar em todo chunck
+knitr::opts_chunk$set(echo = FALSE)
+
+#função criada para instalar as libs antes de importar se já não existirem
+import <- function(libName) {
+  if (!require(libName, character.only = TRUE)){
+    install.packages(libName)  
+    library(libName, character.only = TRUE)
+  }
+}
+
+#importa as libs
+import("dplyr")
+import("stringr")
+import("rjson")
+import("tidyr")
+import("lubridate")
+import("knitr")
+import("ggplot2")
+import("shiny")
+
+
+#usa como separador de registro ; 
+#usa como separador de decimais a ,
+#informa que tem um cabeçalho nos dados lidos
+#a coluna do id não converte pra factor
+df2 <- read.csv(file = "dados/USvideos.csv", sep = ",", header = T, as.is = c("video_id", "category_id", "publish_time"))
+
+#Le o json com as categorias do youtube que vem de outra fonte de dados
+categories <- fromJSON(file = "dados/US_category_id.json", simplify = T)
+categories <- categories$items
+df_categorias <- data.frame( cat_id=NA, cat_titulo=NA)
+
+#Adiciona os registros num data frame com apenas as colunas id e titulo da categoria
+for(cat in categories) {
+  df_categorias <- rbind(df_categorias, c(cat$id, cat$snippet$title))
+}
+
+#remove o registro NA usado na criação do data frame vazio
+df_categorias <- df_categorias %>%
+  filter(!is.na(cat_id))
+
+#junta os dados dos videos com a descricao da categoria
+df2_merge <- merge(df2, df_categorias, by.x = "category_id", by.y = "cat_id")
+
+#Remove linhas que a data da publicação ou likes está NA 
+df2_merge <- df2_merge %>%
+  filter(!is.na(likes) & !is.na(publish_time)) %>%
+  mutate(data_hora_publicacao = as_datetime(publish_time)) %>%
+  mutate(hora_publicacao = hour(data_hora_publicacao))
+
+#remove objeto que não serão mais usados
+rm(cat)
+rm(categories)
+rm(df2)
+
+#função criada para formatar hora:minuto
+fmtHora <- function(data){
+  format(data, "%H:%M")
+}
+
+#função criada para formatar uma data dd/mm/yyyy
+fmtData <- function(data){
+  format(data, "%d/%m/%Y")
+}
+
+```
+
+## Introdução
+
+Análise estatística básica realizada em uma base de dados de vídeos do YouTube onde temos as seguintes informações:
+
+- identificador do vídeo (video_id)
+- data que foi mais visualizado (trending_date)
+- título (title)
+- título do canal (channel_title)
+- tags
+- quantidade de visualizações (views)
+- quantidade de likes (likes)
+- quantidade de dislikes (dislikes)
+- número de comentários (comment_count)
+- identificador da categoria (category_id)
+- título da categoria (cat_titulo)
+- data/hora da publicação (data_hora_publicacao)
+- somente a hora da publicação (hora_publicacao)
+
+
+
+## Perguntas
+
+### 1) Que vídeo teve o maior número de visualizações em 2016?
+
+```{r maior_num_visualizacoes}
+mais_visto <- df2_merge %>%
+                  select(video_id, title, data_hora_publicacao, cat_titulo, views)  %>%
+                  filter(year(data_hora_publicacao) == 2016) %>%
+                  filter(views == max(views)) 
+
+```
+O vídeo "`r mais_visto$title`" publicado em `r fmtData(mais_visto$data_hora_publicacao)` às `r fmtHora(mais_visto$data_hora_publicacao)` na categoria "`r mais_visto$cat_titulo`" foi o mais visto em 2016 com `r mais_visto$views` visualizações.
+
+
+### 2) Qual categoria tem a maior quantidade de videos?
+```{r cat_maior_views}
+cat_mais_videos <- df2_merge %>%
+                      select(category_id, cat_titulo)  %>%
+                      group_by(cat_titulo) %>%
+                      summarise(total_videos = n()) %>%
+                      filter(total_videos == max(total_videos)) 
+
+```
+A categoria "`r cat_mais_videos$cat_titulo`" teve `r cat_mais_videos$total_videos` vídeos postados!
+
+
+### 3) Qual a média de likes por categorias?
+```{r media_likes_cat}
+media_likes <- df2_merge %>%
+                select(video_id, title, cat_titulo, likes)  %>%
+                group_by(cat_titulo) %>%
+                summarise(media_likes = mean(likes)) %>%
+                arrange(desc(media_likes))
+kable(media_likes, col.names = c("Título", "Média de Likes"))
+```
+
+
+### 4) Qual vídeo foi mais visto e odiado ?
+
+```{r video_mais_odiado}
+
+#vídeo teve a maior quantidade de views e o maior número de dislikes simultâneamente
+dislikes_views <- df2_merge %>%
+                      select(video_id, title, cat_titulo, dislikes, views)  %>%
+                      arrange(desc(views)) %>%
+                      distinct(video_id, .keep_all = T) %>%
+                      head(10) %>%
+                      filter(dislikes == max(dislikes))
+```
+O vídeo "`r dislikes_views$title`" da categoria "`r dislikes_views$cat_titulo`" foi o mais visto (`r dislikes_views$views`) que possui mais dislikes (`r dislikes_views$dislikes`) !
+
+
+
+### 5) A quantidade de likes tem relação com a quantidade de comentários?
+
+```{r relacao_likes_comentarios}
+
+dd <- df2_merge %>%
+        mutate(category_id = as.factor(df2_merge$category_id)) %>%
+        select(category_id, cat_titulo, likes, comment_count) %>%
+        filter(likes > 100000)
+    
+ggplot(dd, aes(x=comment_count, y=likes, color=category_id)) +
+  geom_point() +
+  labs(y = "Likes", x = "Número de Comentários")  +
+  scale_x_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE))  +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  scale_colour_discrete(name  ="Categoria",
+                            breaks=dd$category_id,
+                            labels=dd$cat_titulo)
+
+```
+
+O gráfico acima mostra a relação de likes pela quantidade de comentários em um universo de `r count(dd)` vídeos com mais de 100.000 likes.
+
+Vamos verificar a correlação entre número de comentários e o número de likes.
+
+```{r correlaco_comentarios_likes, echo=TRUE}
+
+cor(dd$comment_count, dd$likes)
+
+```
+
+Como deu um valor acima de 0.5, existe uma correlação entre as variáveis.
+
+Vamos criar um modelo de regressão linear da variável explicativa "número de comentários" e a resposta "likes".
+
+```{r modelo_linear, echo=TRUE}
+
+ajuste <- lm(likes ~ comment_count, data=dd) 
+
+summary(ajuste)
+
+```
+
+O valor do p-test 2e-16 foi inferior a 0.05 e o r-squared acima de 0.5 o que demonstra que realmente há uma relação entre as variáveis.
+
+Traçamos a abline no gráfico abaixo usando os coeficiente obtidos intercept=1.841e+05 e slope=4.346e+00.
+
+```{r gplot_abline}
+
+ggplot(dd, aes(y=likes, x=comment_count, color=category_id)) +
+  geom_point() +
+  geom_abline(slope=4.346e+00, intercept = 1.841e+05, color='red', linetype="dashed") +
+  labs(y = "Likes", x = "Número de Comentários", color="Categoria")  +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE))  +
+  scale_x_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  scale_colour_discrete(name  ="Categoria",
+                            breaks=dd$category_id,
+                            labels=dd$cat_titulo)
+
+```
+
+
+### 6) Existe relação entre da hora da publicação e a quantidade de visualizações?
+
+```{r relacao_hora_views}
+
+cor(df2_merge$views, df2_merge$hora_publicacao)
+
+ajuste2 <- lm(df2_merge$views ~ df2_merge$hora_publicacao)
+
+summary(ajuste2)
+
+```
+
+Segundo o modelo de regrassão proposto, a hora da publicação explica muito pouco sobre a quantidade de visualizações, menos de 1%.
+
+
+### 7) Gráfico Interativo
+
+O gráfico a seguir mostra a quantidade de likes vs visualizações em uma determinada categoria para o período selecionado. Além disso, será mostrados informações sobre o vídeo mais visualizado na categoria e períodos selecionados.
+
+```{r bloco_shiny}
+
+categorias_disponiveis <- dd %>%
+                            select(cat_titulo) %>%
+                            distinct()
+
+shinyApp(
+
+  ui = fluidPage(
+     
+    selectInput(inputId = "cmb_categoria",
+                  label = "Escolha uma Categoria:",
+                  choices = categorias_disponiveis$cat_titulo),
+
+    sliderInput(inputId = "anos",
+                  label = "Filtrar Anos:",
+                  sep = "",
+                  min = 2006,
+                  max = 2018,
+                  value = c(2010, 2016)),
+    
+    plotOutput("grafico"),
+    
+    textOutput("infos")
+    
+  ),
+
+  server = function(input, output) {
+    output$grafico <- renderPlot({
+
+        view <- df2_merge %>%
+                  filter(cat_titulo == input$cmb_categoria) %>%
+                  filter(year(data_hora_publicacao) >= input$anos[1] & year(data_hora_publicacao) <= input$anos[2])
+      
+        ggplot(view, aes(y=likes, x=views)) +
+            geom_point(color="#377EB8", size=3) +
+            labs(y = "Likes", x = "Número de Visualizações")  +
+            scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE))  +
+            scale_x_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE))
+        
+    })
+    
+    output$infos <- renderText({ 
+        resultado <- df2_merge %>%
+                        filter(cat_titulo == input$cmb_categoria) %>%
+                        select(video_id, title, data_hora_publicacao, cat_titulo, views, channel_title)  %>%
+                        filter(year(data_hora_publicacao) >= input$anos[1] & year(data_hora_publicacao) <= input$anos[2]) %>%
+                        filter(views == max(views)) 
+        
+        paste("O vídeo da categoria '", input$cmb_categoria, "' mais visto entre ", input$anos[1] , " e ", input$anos[2], " foi o '", resultado$title, "' do usuário/canal '", resultado$channel_title, "'.\n", "Esse vídeo foi publicado em ", fmtData(resultado$data_hora_publicacao), " e teve ", resultado$views , " visualizações.")
+    })
+  },
+
+  options = list(height = 800)
+  
+)
+```
